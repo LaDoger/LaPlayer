@@ -13,6 +13,7 @@ final class PlayerView: NSView {
     private let currentTimeLabel = NSTextField(labelWithString: "0:00:00.00")
     private let durationLabel = NSTextField(labelWithString: "0:00:00.00")
     private let legendLabel = NSTextField(labelWithString: "")
+    private let resolutionLabel = NSTextField(labelWithString: "")
     private let hintLabel = NSTextField(labelWithString: "Drop a video file here, or press ⌘O")
 
     private static let legend: NSAttributedString = {
@@ -96,7 +97,11 @@ final class PlayerView: NSView {
         legendLabel.alignment = .center
         legendLabel.attributedStringValue = Self.legend
 
-        for field in [currentTimeLabel, durationLabel, legendLabel] {
+        resolutionLabel.textColor = NSColor.white.withAlphaComponent(0.6)
+        resolutionLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        resolutionLabel.alignment = .right
+
+        for field in [currentTimeLabel, durationLabel, legendLabel, resolutionLabel] {
             field.translatesAutoresizingMaskIntoConstraints = false
             field.isEditable = false
             field.isBordered = false
@@ -112,6 +117,7 @@ final class PlayerView: NSView {
         overlay.addSubview(durationLabel)
         overlay.addSubview(progressBar)
         overlay.addSubview(legendLabel)
+        overlay.addSubview(resolutionLabel)
 
         NSLayoutConstraint.activate([
             overlay.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
@@ -132,6 +138,9 @@ final class PlayerView: NSView {
 
             legendLabel.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
             legendLabel.topAnchor.constraint(equalTo: currentTimeLabel.bottomAnchor, constant: 4),
+
+            resolutionLabel.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -10),
+            resolutionLabel.centerYAnchor.constraint(equalTo: legendLabel.centerYAnchor),
         ])
     }
 
@@ -164,19 +173,33 @@ final class PlayerView: NSView {
 
         hintLabel.isHidden = true
         legendLabel.attributedStringValue = Self.legend
+        resolutionLabel.stringValue = ""
         window?.title = url.path
         window?.representedURL = url
 
         Task { [weak self] in
             guard let self else { return }
             let duration = try? await item.asset.load(.duration)
-            let fps = try? await item.asset.loadTracks(withMediaType: .video).first?.load(.nominalFrameRate)
+            let track = try? await item.asset.loadTracks(withMediaType: .video).first
+            let fps = try? await track?.load(.nominalFrameRate)
+            let dimensions: (width: Int, height: Int)? = await {
+                guard let track else { return nil }
+                guard let size = try? await track.load(.naturalSize),
+                      let transform = try? await track.load(.preferredTransform) else { return nil }
+                let display = size.applying(transform)
+                return (Int(abs(display.width).rounded()), Int(abs(display.height).rounded()))
+            }()
             await MainActor.run {
                 if let duration, duration.seconds.isFinite {
                     self.durationSeconds = duration.seconds
                 }
                 if let fps, fps > 0 {
                     self.frameRate = Double(fps)
+                }
+                if let dimensions, dimensions.width > 0, dimensions.height > 0 {
+                    let ratio = Double(dimensions.width) / Double(dimensions.height)
+                    self.resolutionLabel.stringValue = String(
+                        format: "%d * %d (%.2f:1)", dimensions.width, dimensions.height, ratio)
                 }
                 self.updateProgressUI()
             }
