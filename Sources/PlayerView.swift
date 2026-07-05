@@ -1,0 +1,344 @@
+import Cocoa
+import AVFoundation
+
+final class PlayerView: NSView {
+    private let player = AVPlayer()
+    private var playerLayer: AVPlayerLayer!
+    private var videoURL: URL?
+    private var durationSeconds: Double = 0
+    private var frameRate: Double = 0
+
+    private let overlay = NSView()
+    private let progressBar = ProgressBarView()
+    private let currentTimeLabel = NSTextField(labelWithString: "0:00:00.00")
+    private let durationLabel = NSTextField(labelWithString: "0:00:00.00")
+    private let legendLabel = NSTextField(labelWithString: "")
+    private let hintLabel = NSTextField(labelWithString: "Drop a video file here, or press ⌘O")
+
+    private static let legend: NSAttributedString = {
+        let keyAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.85),
+            .backgroundColor: NSColor.white.withAlphaComponent(0.18),
+        ]
+        let descAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.6),
+        ]
+        let items: [(key: String, desc: String)] = [
+            ("space", "play/pause"),
+            ("←", "-3s"),
+            ("→", "+3s"),
+            ("<", "prev frame"),
+            (">", "next frame"),
+            ("?", "snapshot"),
+        ]
+        let result = NSMutableAttributedString()
+        for (i, item) in items.enumerated() {
+            if i > 0 { result.append(NSAttributedString(string: "     ", attributes: descAttrs)) }
+            result.append(NSAttributedString(string: " \(item.key) ", attributes: keyAttrs))
+            result.append(NSAttributedString(string: " \(item.desc)", attributes: descAttrs))
+        }
+        return result
+    }()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.cgColor
+
+        setupVideoLayer()
+        setupOverlay()
+        setupHint()
+
+        registerForDraggedTypes([.fileURL])
+
+        player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.1, preferredTimescale: 600),
+            queue: .main
+        ) { [weak self] _ in
+            self?.updateProgressUI()
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func layout() {
+        super.layout()
+        playerLayer.frame = bounds
+    }
+
+    // MARK: - Setup
+
+    private func setupVideoLayer() {
+        playerLayer = AVPlayerLayer(player: player)
+        playerLayer.videoGravity = .resizeAspect
+        layer?.addSublayer(playerLayer)
+    }
+
+    private func setupOverlay() {
+        overlay.wantsLayer = true
+        overlay.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
+        overlay.layer?.cornerRadius = 12
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(overlay)
+
+        currentTimeLabel.textColor = .white
+        durationLabel.textColor = .white
+        currentTimeLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        durationLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+
+        legendLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        legendLabel.alignment = .center
+        legendLabel.attributedStringValue = Self.legend
+
+        for field in [currentTimeLabel, durationLabel, legendLabel] {
+            field.translatesAutoresizingMaskIntoConstraints = false
+            field.isEditable = false
+            field.isBordered = false
+            field.drawsBackground = false
+        }
+
+        progressBar.translatesAutoresizingMaskIntoConstraints = false
+        progressBar.onSeek = { [weak self] fraction in
+            self?.seek(toFraction: fraction)
+        }
+
+        overlay.addSubview(currentTimeLabel)
+        overlay.addSubview(durationLabel)
+        overlay.addSubview(progressBar)
+        overlay.addSubview(legendLabel)
+
+        NSLayoutConstraint.activate([
+            overlay.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            overlay.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            overlay.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+            overlay.heightAnchor.constraint(equalToConstant: 48),
+
+            currentTimeLabel.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 10),
+            currentTimeLabel.topAnchor.constraint(equalTo: overlay.topAnchor, constant: 6),
+
+            durationLabel.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -10),
+            durationLabel.centerYAnchor.constraint(equalTo: currentTimeLabel.centerYAnchor),
+
+            progressBar.leadingAnchor.constraint(equalTo: currentTimeLabel.trailingAnchor, constant: 8),
+            progressBar.trailingAnchor.constraint(equalTo: durationLabel.leadingAnchor, constant: -8),
+            progressBar.centerYAnchor.constraint(equalTo: currentTimeLabel.centerYAnchor),
+            progressBar.heightAnchor.constraint(equalToConstant: 14),
+
+            legendLabel.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
+            legendLabel.topAnchor.constraint(equalTo: currentTimeLabel.bottomAnchor, constant: 4),
+        ])
+    }
+
+    private func setupHint() {
+        hintLabel.textColor = NSColor.white.withAlphaComponent(0.4)
+        hintLabel.font = .systemFont(ofSize: 14, weight: .medium)
+        hintLabel.translatesAutoresizingMaskIntoConstraints = false
+        hintLabel.isEditable = false
+        hintLabel.isBordered = false
+        hintLabel.drawsBackground = false
+        addSubview(hintLabel)
+
+        NSLayoutConstraint.activate([
+            hintLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            hintLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    // MARK: - Loading
+
+    func load(url: URL) {
+        videoURL = url
+        durationSeconds = 0
+        frameRate = 0
+        UserDefaults.standard.set(url.path, forKey: "lastVideoPath")
+
+        let item = AVPlayerItem(url: url)
+        player.replaceCurrentItem(with: item)
+        player.seek(to: .zero)
+
+        hintLabel.isHidden = true
+        legendLabel.attributedStringValue = Self.legend
+        window?.title = url.path
+        window?.representedURL = url
+
+        Task { [weak self] in
+            guard let self else { return }
+            let duration = try? await item.asset.load(.duration)
+            let fps = try? await item.asset.loadTracks(withMediaType: .video).first?.load(.nominalFrameRate)
+            await MainActor.run {
+                if let duration, duration.seconds.isFinite {
+                    self.durationSeconds = duration.seconds
+                }
+                if let fps, fps > 0 {
+                    self.frameRate = Double(fps)
+                }
+                self.updateProgressUI()
+            }
+        }
+
+        window?.makeFirstResponder(self)
+    }
+
+    // MARK: - Transport
+
+    private func seek(to time: CMTime) {
+        guard let item = player.currentItem else { return }
+        let clamped = CMTimeClampToRange(time, range: CMTimeRange(start: .zero, duration: item.duration))
+        player.seek(to: clamped, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            DispatchQueue.main.async { self?.updateProgressUI() }
+        }
+    }
+
+    func seek(toFraction fraction: CGFloat) {
+        guard durationSeconds > 0 else { return }
+        seek(to: CMTime(seconds: Double(fraction) * durationSeconds, preferredTimescale: 600))
+    }
+
+    func jump(bySeconds seconds: Double) {
+        guard player.currentItem != nil else { return }
+        seek(to: CMTimeAdd(player.currentTime(), CMTime(seconds: seconds, preferredTimescale: 600)))
+    }
+
+    func stepFrame(by count: Int) {
+        guard let item = player.currentItem else { return }
+        player.pause()
+        item.step(byCount: count)
+        DispatchQueue.main.async { [weak self] in self?.updateProgressUI() }
+    }
+
+    func togglePlayPause() {
+        guard player.currentItem != nil else { return }
+        if player.rate == 0 {
+            let atEnd = durationSeconds > 0 && player.currentTime().seconds >= durationSeconds - 0.05
+            if atEnd {
+                player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+                    self?.player.play()
+                }
+            } else {
+                player.play()
+            }
+        } else {
+            player.pause()
+        }
+    }
+
+    private func updateProgressUI() {
+        let current = player.currentTime().seconds
+        currentTimeLabel.stringValue = formatTime(current)
+        durationLabel.stringValue = formatTime(durationSeconds)
+        if durationSeconds > 0 {
+            progressBar.progress = CGFloat(current / durationSeconds)
+        }
+    }
+
+    private func formatTime(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "0:00:00.00" }
+        let whole = Int(seconds)
+        let frame = frameRate > 0 ? Int((seconds - Double(whole)) * frameRate) : 0
+        return String(format: "%d:%02d:%02d.%02d", whole / 3600, (whole % 3600) / 60, whole % 60, frame)
+    }
+
+    // MARK: - Snapshot
+
+    private func takeSnapshot() {
+        guard let item = player.currentItem, let videoURL else {
+            NSSound.beep()
+            return
+        }
+
+        let generator = AVAssetImageGenerator(asset: item.asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+
+        let time = player.currentTime()
+        generator.generateCGImageAsynchronously(for: time) { [weak self] cgImage, _, error in
+            guard let self, let cgImage, error == nil else {
+                DispatchQueue.main.async { NSSound.beep() }
+                return
+            }
+            let rep = NSBitmapImageRep(cgImage: cgImage)
+            guard let data = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.9]) else {
+                DispatchQueue.main.async { NSSound.beep() }
+                return
+            }
+            let destination = self.nextSnapshotURL(for: videoURL)
+            do {
+                try data.write(to: destination)
+                DispatchQueue.main.async {
+                    self.showSnapshotConfirmation(filename: destination.lastPathComponent)
+                }
+            } catch {
+                DispatchQueue.main.async { NSSound.beep() }
+            }
+        }
+    }
+
+    private func nextSnapshotURL(for videoURL: URL) -> URL {
+        let folder = videoURL.deletingLastPathComponent()
+        let base = videoURL.deletingPathExtension().lastPathComponent
+        var index = 1
+        var candidate: URL
+        repeat {
+            candidate = folder.appendingPathComponent("\(base)\(index).jpg")
+            index += 1
+        } while FileManager.default.fileExists(atPath: candidate.path)
+        return candidate
+    }
+
+    private var confirmationWorkItem: DispatchWorkItem?
+
+    private func showSnapshotConfirmation(filename: String) {
+        confirmationWorkItem?.cancel()
+        legendLabel.stringValue = "Saved \(filename)"
+        legendLabel.textColor = NSColor.systemGreen
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.legendLabel.attributedStringValue = Self.legend
+        }
+        confirmationWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: workItem)
+    }
+
+    // MARK: - Keyboard
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 123: jump(bySeconds: -3); return // left arrow
+        case 124: jump(bySeconds: 3); return  // right arrow
+        default: break
+        }
+
+        if let chars = event.charactersIgnoringModifiers {
+            switch chars {
+            case ".": stepFrame(by: 1); return
+            case ",": stepFrame(by: -1); return
+            case "/": takeSnapshot(); return
+            case " ": togglePlayPause(); return
+            default: break
+            }
+        }
+        super.keyDown(with: event)
+    }
+
+    // MARK: - Drag & drop
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: nil) else { return [] }
+        return .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let url = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: nil)?.first as? URL else {
+            return false
+        }
+        load(url: url)
+        return true
+    }
+}
