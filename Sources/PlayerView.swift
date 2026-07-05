@@ -9,6 +9,7 @@ final class PlayerView: NSView {
     private var frameRate: Double = 0
 
     private let overlay = NSView()
+    private let transportIcon = NSImageView()
     private let progressBar = ProgressBarView()
     private let currentTimeLabel = NSTextField(labelWithString: "0:00:00.00")
     private let durationLabel = NSTextField(labelWithString: "0:00:00.00")
@@ -50,6 +51,7 @@ final class PlayerView: NSView {
 
         setupVideoLayer()
         setupOverlay()
+        setupTransportIcon()
         setupHint()
 
         registerForDraggedTypes([.fileURL])
@@ -144,6 +146,41 @@ final class PlayerView: NSView {
         ])
     }
 
+    private func setupTransportIcon() {
+        transportIcon.translatesAutoresizingMaskIntoConstraints = false
+        transportIcon.imageScaling = .scaleProportionallyUpOrDown
+        transportIcon.contentTintColor = .white
+        transportIcon.wantsLayer = true
+        transportIcon.alphaValue = 0
+        addSubview(transportIcon)
+
+        NSLayoutConstraint.activate([
+            transportIcon.centerXAnchor.constraint(equalTo: centerXAnchor),
+            transportIcon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            transportIcon.widthAnchor.constraint(equalToConstant: 100),
+            transportIcon.heightAnchor.constraint(equalToConstant: 100),
+        ])
+    }
+
+    private func showTransportIcon(playing: Bool) {
+        let name = playing ? "play.fill" : "pause.fill"
+        let config = NSImage.SymbolConfiguration(pointSize: 84, weight: .regular)
+        transportIcon.image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(config)
+
+        // Commit the starting alpha this tick, then animate to zero on the next tick so the
+        // fade-out reads 0.5 as its starting (presentation) value rather than the leftover 0.
+        transportIcon.layer?.removeAllAnimations()
+        transportIcon.alphaValue = 0.5
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 1.0
+                self.transportIcon.animator().alphaValue = 0
+            }
+        }
+    }
+
     private func setupHint() {
         hintLabel.textColor = NSColor.white.withAlphaComponent(0.4)
         hintLabel.font = .systemFont(ofSize: 14, weight: .medium)
@@ -167,9 +204,15 @@ final class PlayerView: NSView {
         frameRate = 0
         UserDefaults.standard.set(url.path, forKey: "lastVideoPath")
 
+        let savedPosition = UserDefaults.standard.double(forKey: Self.positionKey(url))
         let item = AVPlayerItem(url: url)
         player.replaceCurrentItem(with: item)
-        player.seek(to: .zero)
+        if savedPosition > 0 {
+            player.seek(to: CMTime(seconds: savedPosition, preferredTimescale: 600),
+                        toleranceBefore: .zero, toleranceAfter: .zero)
+        } else {
+            player.seek(to: .zero)
+        }
 
         hintLabel.isHidden = true
         legendLabel.attributedStringValue = Self.legend
@@ -201,11 +244,19 @@ final class PlayerView: NSView {
                     self.resolutionLabel.stringValue = String(
                         format: "%d * %d (%.2f:1)", dimensions.width, dimensions.height, ratio)
                 }
+                // If the saved position was at (or near) the very end, restart from the beginning.
+                if savedPosition > 0, self.durationSeconds > 0,
+                   savedPosition >= self.durationSeconds - 0.5 {
+                    self.player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+                }
                 self.updateProgressUI()
             }
         }
 
         window?.makeFirstResponder(self)
+
+        player.play()
+        showTransportIcon(playing: true)
     }
 
     // MARK: - Transport
@@ -246,8 +297,10 @@ final class PlayerView: NSView {
             } else {
                 player.play()
             }
+            showTransportIcon(playing: true)
         } else {
             player.pause()
+            showTransportIcon(playing: false)
         }
     }
 
@@ -258,6 +311,18 @@ final class PlayerView: NSView {
         if durationSeconds > 0 {
             progressBar.progress = CGFloat(current / durationSeconds)
         }
+        saveCurrentPosition()
+    }
+
+    private static func positionKey(_ url: URL) -> String {
+        "position:" + url.path
+    }
+
+    private func saveCurrentPosition() {
+        guard let videoURL, durationSeconds > 0 else { return }
+        let current = player.currentTime().seconds
+        guard current.isFinite else { return }
+        UserDefaults.standard.set(current, forKey: Self.positionKey(videoURL))
     }
 
     private func formatTime(_ seconds: Double) -> String {
