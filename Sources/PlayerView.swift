@@ -8,8 +8,13 @@ final class PlayerView: NSView {
     private var durationSeconds: Double = 0
     private var frameRate: Double = 0
 
+    private var trimStart: CMTime?
+    private var trimEnd: CMTime?
+    private var exportSession: AVAssetExportSession?
+
     private let overlay = NSView()
     private let transportIcon = NSImageView()
+    private let centerMessageLabel = NSTextField(labelWithString: "")
     private let progressBar = ProgressBarView()
     private let currentTimeLabel = NSTextField(labelWithString: "0:00:00.00")
     private let durationLabel = NSTextField(labelWithString: "0:00:00.00")
@@ -34,6 +39,8 @@ final class PlayerView: NSView {
             ("<", "prev frame"),
             (">", "next frame"),
             ("?", "snapshot"),
+            ("i", "trim start"),
+            ("o", "trim end"),
         ]
         let result = NSMutableAttributedString()
         for (i, item) in items.enumerated() {
@@ -52,6 +59,7 @@ final class PlayerView: NSView {
         setupVideoLayer()
         setupOverlay()
         setupTransportIcon()
+        setupCenterMessage()
         setupHint()
 
         registerForDraggedTypes([.fileURL])
@@ -181,6 +189,47 @@ final class PlayerView: NSView {
         }
     }
 
+    private func setupCenterMessage() {
+        centerMessageLabel.translatesAutoresizingMaskIntoConstraints = false
+        centerMessageLabel.isEditable = false
+        centerMessageLabel.isBordered = false
+        centerMessageLabel.drawsBackground = false
+        centerMessageLabel.alignment = .center
+        centerMessageLabel.textColor = .white
+        centerMessageLabel.font = .systemFont(ofSize: 26, weight: .semibold)
+        centerMessageLabel.wantsLayer = true
+        centerMessageLabel.alphaValue = 0
+        centerMessageLabel.shadow = {
+            let s = NSShadow()
+            s.shadowColor = NSColor.black.withAlphaComponent(0.8)
+            s.shadowBlurRadius = 6
+            s.shadowOffset = NSSize(width: 0, height: -1)
+            return s
+        }()
+        addSubview(centerMessageLabel)
+
+        NSLayoutConstraint.activate([
+            centerMessageLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            centerMessageLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            centerMessageLabel.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 20),
+            centerMessageLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -20),
+        ])
+    }
+
+    /// Flash a message in the center that fades out, mirroring the transport icon HUD.
+    private func showCenterMessage(_ text: String) {
+        centerMessageLabel.stringValue = text
+        centerMessageLabel.layer?.removeAllAnimations()
+        centerMessageLabel.alphaValue = 1
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 1.6
+                self.centerMessageLabel.animator().alphaValue = 0
+            }
+        }
+    }
+
     private func setupHint() {
         hintLabel.textColor = NSColor.white.withAlphaComponent(0.4)
         hintLabel.font = .systemFont(ofSize: 14, weight: .medium)
@@ -202,6 +251,7 @@ final class PlayerView: NSView {
         videoURL = url
         durationSeconds = 0
         frameRate = 0
+        clearTrimMarks()
         UserDefaults.standard.set(url.path, forKey: "lastVideoPath")
 
         let savedPosition = UserDefaults.standard.double(forKey: Self.positionKey(url))
@@ -360,7 +410,7 @@ final class PlayerView: NSView {
             do {
                 try data.write(to: destination)
                 DispatchQueue.main.async {
-                    self.showSnapshotConfirmation(filename: destination.lastPathComponent)
+                    self.showCenterMessage("Saved \(destination.lastPathComponent)")
                 }
             } catch {
                 DispatchQueue.main.async { NSSound.beep() }
@@ -380,18 +430,105 @@ final class PlayerView: NSView {
         return candidate
     }
 
-    private var confirmationWorkItem: DispatchWorkItem?
+    // MARK: - Trim
 
-    private func showSnapshotConfirmation(filename: String) {
-        confirmationWorkItem?.cancel()
-        legendLabel.stringValue = "Saved \(filename)"
-        legendLabel.textColor = NSColor.systemGreen
-
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.legendLabel.attributedStringValue = Self.legend
+    private func markTrim(isStart: Bool) {
+        guard player.currentItem != nil, durationSeconds > 0 else {
+            NSSound.beep()
+            return
         }
-        confirmationWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: workItem)
+        let time = player.currentTime()
+        let fraction = CGFloat(time.seconds / durationSeconds)
+
+        if isStart {
+            // A start after the existing end invalidates that end: drop it and keep only the new start.
+            if let end = trimEnd, time > end {
+                trimEnd = nil
+                progressBar.trimEndFraction = nil
+            }
+            trimStart = time
+            progressBar.trimStartFraction = fraction
+            showCenterMessage("Start frame for trimming the clip is marked at \(formatTime(time.seconds))")
+        } else {
+            // An end before the existing start invalidates that start: drop it and keep only the new end.
+            if let start = trimStart, time < start {
+                trimStart = nil
+                progressBar.trimStartFraction = nil
+            }
+            trimEnd = time
+            progressBar.trimEndFraction = fraction
+            showCenterMessage("End frame for trimming the clip is marked at \(formatTime(time.seconds))")
+        }
+
+        if let start = trimStart, let end = trimEnd {
+            exportClip(start: start, end: end)
+        }
+    }
+
+    private func clearTrimMarks() {
+        trimStart = nil
+        trimEnd = nil
+        progressBar.trimStartFraction = nil
+        progressBar.trimEndFraction = nil
+    }
+
+    private func exportClip(start: CMTime, end: CMTime) {
+        guard let videoURL, let asset = player.currentItem?.asset else {
+            NSSound.beep()
+            return
+        }
+        let lo = min(start, end)
+        let hi = max(start, end)
+        guard hi.seconds - lo.seconds > 0.01 else {
+            showCenterMessage("Trim start and end are the same frame")
+            return
+        }
+
+        guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else {
+            NSSound.beep()
+            return
+        }
+        let destination = nextClipURL(for: videoURL)
+        session.outputURL = destination
+        session.outputFileType = Self.exportFileType(for: videoURL)
+        session.timeRange = CMTimeRange(start: lo, end: hi)
+        exportSession = session
+
+        session.exportAsynchronously { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch session.status {
+                case .completed:
+                    self.clearTrimMarks()
+                    self.showCenterMessage("Clip saved as \(destination.lastPathComponent)")
+                default:
+                    NSSound.beep()
+                    self.showCenterMessage("Clip export failed")
+                }
+                self.exportSession = nil
+            }
+        }
+    }
+
+    private func nextClipURL(for videoURL: URL) -> URL {
+        let folder = videoURL.deletingLastPathComponent()
+        let base = videoURL.deletingPathExtension().lastPathComponent
+        let ext = videoURL.pathExtension.isEmpty ? "mov" : videoURL.pathExtension
+        var index = 1
+        var candidate: URL
+        repeat {
+            candidate = folder.appendingPathComponent("\(base)_\(index).\(ext)")
+            index += 1
+        } while FileManager.default.fileExists(atPath: candidate.path)
+        return candidate
+    }
+
+    private static func exportFileType(for url: URL) -> AVFileType {
+        switch url.pathExtension.lowercased() {
+        case "mp4": return .mp4
+        case "m4v": return .m4v
+        default: return .mov
+        }
     }
 
     // MARK: - Keyboard
@@ -409,6 +546,8 @@ final class PlayerView: NSView {
             case ",": stepFrame(by: -1); return
             case "/": takeSnapshot(); return
             case " ": togglePlayPause(); return
+            case "i": markTrim(isStart: true); return
+            case "o": markTrim(isStart: false); return
             default: break
             }
         }
