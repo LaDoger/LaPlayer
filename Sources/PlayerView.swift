@@ -7,6 +7,10 @@ final class PlayerView: NSView {
     private var videoURL: URL?
     private var durationSeconds: Double = 0
     private var frameRate: Double = 0
+    private var isAudioOnly = false
+
+    /// Audio has no real frame rate, so `<`/`>` step by a fixed unit instead of a decoded frame.
+    private static let audioStepSeconds: Double = 1.0 / 24.0
 
     private var trimStart: CMTime?
     private var trimEnd: CMTime?
@@ -15,6 +19,8 @@ final class PlayerView: NSView {
     private let overlay = NSView()
     private let transportIcon = NSImageView()
     private let centerMessageLabel = NSTextField(labelWithString: "")
+    private let coverArtView = NSImageView()
+    private let audioLabel = NSTextField(labelWithString: "")
     private let progressBar = ProgressBarView()
     private let currentTimeLabel = NSTextField(labelWithString: "0:00:00.00")
     private let durationLabel = NSTextField(labelWithString: "0:00:00.00")
@@ -22,7 +28,7 @@ final class PlayerView: NSView {
     private let resolutionLabel = NSTextField(labelWithString: "")
     private let hintLabel = NSTextField(labelWithString: "Drop a video file here, or press ⌘O")
 
-    private static let legend: NSAttributedString = {
+    private static func legend(isAudioOnly: Bool) -> NSAttributedString {
         let keyAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
             .foregroundColor: NSColor.white.withAlphaComponent(0.85),
@@ -32,16 +38,18 @@ final class PlayerView: NSView {
             .font: NSFont.systemFont(ofSize: 11),
             .foregroundColor: NSColor.white.withAlphaComponent(0.6),
         ]
-        let items: [(key: String, desc: String)] = [
+        var items: [(key: String, desc: String)] = [
             ("space", "play/pause"),
             ("←", "-3s"),
             ("→", "+3s"),
-            ("<", "prev frame"),
-            (">", "next frame"),
-            ("?", "snapshot"),
-            ("i", "trim start"),
-            ("o", "trim end"),
+            ("<", isAudioOnly ? "-1/24s" : "prev frame"),
+            (">", isAudioOnly ? "+1/24s" : "next frame"),
         ]
+        if !isAudioOnly {
+            items.append(("?", "snapshot"))
+        }
+        items.append(("i", "trim start"))
+        items.append(("o", "trim end"))
         let result = NSMutableAttributedString()
         for (i, item) in items.enumerated() {
             if i > 0 { result.append(NSAttributedString(string: "     ", attributes: descAttrs)) }
@@ -49,7 +57,7 @@ final class PlayerView: NSView {
             result.append(NSAttributedString(string: " \(item.desc)", attributes: descAttrs))
         }
         return result
-    }()
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -57,6 +65,7 @@ final class PlayerView: NSView {
         layer?.backgroundColor = NSColor.black.cgColor
 
         setupVideoLayer()
+        setupCoverArt()
         setupOverlay()
         setupTransportIcon()
         setupCenterMessage()
@@ -91,6 +100,35 @@ final class PlayerView: NSView {
         layer?.addSublayer(playerLayer)
     }
 
+    private func setupCoverArt() {
+        coverArtView.translatesAutoresizingMaskIntoConstraints = false
+        coverArtView.imageScaling = .scaleProportionallyUpOrDown
+        coverArtView.isHidden = true
+        addSubview(coverArtView)
+
+        audioLabel.translatesAutoresizingMaskIntoConstraints = false
+        audioLabel.isEditable = false
+        audioLabel.isBordered = false
+        audioLabel.drawsBackground = false
+        audioLabel.alignment = .center
+        audioLabel.textColor = NSColor.white.withAlphaComponent(0.8)
+        audioLabel.font = .systemFont(ofSize: 15, weight: .medium)
+        audioLabel.isHidden = true
+        addSubview(audioLabel)
+
+        NSLayoutConstraint.activate([
+            coverArtView.centerXAnchor.constraint(equalTo: centerXAnchor),
+            coverArtView.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -20),
+            coverArtView.widthAnchor.constraint(equalToConstant: 280),
+            coverArtView.heightAnchor.constraint(equalToConstant: 280),
+
+            audioLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            audioLabel.topAnchor.constraint(equalTo: coverArtView.bottomAnchor, constant: 16),
+            audioLabel.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 20),
+            audioLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -20),
+        ])
+    }
+
     private func setupOverlay() {
         overlay.wantsLayer = true
         overlay.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
@@ -105,7 +143,7 @@ final class PlayerView: NSView {
 
         legendLabel.font = .systemFont(ofSize: 11, weight: .regular)
         legendLabel.alignment = .center
-        legendLabel.attributedStringValue = Self.legend
+        legendLabel.attributedStringValue = Self.legend(isAudioOnly: false)
 
         resolutionLabel.textColor = NSColor.white.withAlphaComponent(0.6)
         resolutionLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
@@ -251,6 +289,7 @@ final class PlayerView: NSView {
         videoURL = url
         durationSeconds = 0
         frameRate = 0
+        isAudioOnly = false
         clearTrimMarks()
         UserDefaults.standard.set(url.path, forKey: "lastVideoPath")
 
@@ -265,10 +304,17 @@ final class PlayerView: NSView {
         }
 
         hintLabel.isHidden = true
-        legendLabel.attributedStringValue = Self.legend
+        legendLabel.attributedStringValue = Self.legend(isAudioOnly: false)
         resolutionLabel.stringValue = ""
         window?.title = url.path
         window?.representedURL = url
+
+        // Reset to the video presentation until the asset tells us otherwise.
+        playerLayer.isHidden = false
+        coverArtView.isHidden = true
+        coverArtView.image = nil
+        audioLabel.isHidden = true
+        audioLabel.stringValue = ""
 
         Task { [weak self] in
             guard let self else { return }
@@ -282,11 +328,40 @@ final class PlayerView: NSView {
                 let display = size.applying(transform)
                 return (Int(abs(display.width).rounded()), Int(abs(display.height).rounded()))
             }()
+
+            let isAudio = track == nil
+            var artwork: NSImage?
+            var subtitle: String?
+            if isAudio {
+                let metadata = (try? await item.asset.load(.commonMetadata)) ?? []
+                let artItem = AVMetadataItem.metadataItems(from: metadata, filteredByIdentifier: .commonIdentifierArtwork).first
+                if let data = (try? await artItem?.load(.dataValue)) ?? nil {
+                    artwork = NSImage(data: data)
+                }
+                let titleItem = AVMetadataItem.metadataItems(from: metadata, filteredByIdentifier: .commonIdentifierTitle).first
+                let artistItem = AVMetadataItem.metadataItems(from: metadata, filteredByIdentifier: .commonIdentifierArtist).first
+                let title = try? await titleItem?.load(.stringValue)
+                let artist = try? await artistItem?.load(.stringValue)
+                subtitle = [title ?? nil, artist ?? nil].compactMap { $0 }.joined(separator: " — ")
+            }
+
             await MainActor.run {
                 if let duration, duration.seconds.isFinite {
                     self.durationSeconds = duration.seconds
                 }
-                if let fps, fps > 0 {
+                self.isAudioOnly = isAudio
+                if isAudio {
+                    self.frameRate = 1.0 / Self.audioStepSeconds
+                    self.playerLayer.isHidden = true
+                    self.coverArtView.image = artwork ?? NSImage(
+                        systemSymbolName: "music.note", accessibilityDescription: nil)?
+                        .withSymbolConfiguration(.init(pointSize: 96, weight: .thin))
+                    self.coverArtView.contentTintColor = artwork == nil ? .white.withAlphaComponent(0.4) : nil
+                    self.coverArtView.isHidden = false
+                    let fallbackName = url.deletingPathExtension().lastPathComponent
+                    self.audioLabel.stringValue = (subtitle?.isEmpty == false ? subtitle! : fallbackName)
+                    self.audioLabel.isHidden = false
+                } else if let fps, fps > 0 {
                     self.frameRate = Double(fps)
                 }
                 if let dimensions, dimensions.width > 0, dimensions.height > 0 {
@@ -294,6 +369,7 @@ final class PlayerView: NSView {
                     self.resolutionLabel.stringValue = String(
                         format: "%d * %d (%.2f:1)", dimensions.width, dimensions.height, ratio)
                 }
+                self.legendLabel.attributedStringValue = Self.legend(isAudioOnly: self.isAudioOnly)
                 // If the saved position was at (or near) the very end, restart from the beginning.
                 if savedPosition > 0, self.durationSeconds > 0,
                    savedPosition >= self.durationSeconds - 0.5 {
@@ -332,8 +408,12 @@ final class PlayerView: NSView {
     func stepFrame(by count: Int) {
         guard let item = player.currentItem else { return }
         player.pause()
-        item.step(byCount: count)
-        DispatchQueue.main.async { [weak self] in self?.updateProgressUI() }
+        if isAudioOnly {
+            jump(bySeconds: Double(count) * Self.audioStepSeconds)
+        } else {
+            item.step(byCount: count)
+            DispatchQueue.main.async { [weak self] in self?.updateProgressUI() }
+        }
     }
 
     func togglePlayPause() {
@@ -473,7 +553,7 @@ final class PlayerView: NSView {
     }
 
     private func exportClip(start: CMTime, end: CMTime) {
-        guard let videoURL, let asset = player.currentItem?.asset else {
+        guard let videoURL else {
             NSSound.beep()
             return
         }
@@ -484,7 +564,13 @@ final class PlayerView: NSView {
             return
         }
 
-        guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else {
+        if videoURL.pathExtension.lowercased() == "mp3" {
+            exportMP3Clip(from: videoURL, start: lo.seconds, end: hi.seconds)
+            return
+        }
+
+        guard let asset = player.currentItem?.asset,
+              let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else {
             NSSound.beep()
             return
         }
@@ -510,6 +596,24 @@ final class PlayerView: NSView {
         }
     }
 
+    private func exportMP3Clip(from sourceURL: URL, start: Double, end: Double) {
+        let destination = nextClipURL(for: sourceURL)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                try MP3Trimmer.trim(sourceURL: sourceURL, start: start, end: end, to: destination)
+                DispatchQueue.main.async {
+                    self?.clearTrimMarks()
+                    self?.showCenterMessage("Clip saved as \(destination.lastPathComponent)")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    NSSound.beep()
+                    self?.showCenterMessage("MP3 trim failed — unsupported or corrupt file")
+                }
+            }
+        }
+    }
+
     private func nextClipURL(for videoURL: URL) -> URL {
         let folder = videoURL.deletingLastPathComponent()
         let base = videoURL.deletingPathExtension().lastPathComponent
@@ -527,6 +631,10 @@ final class PlayerView: NSView {
         switch url.pathExtension.lowercased() {
         case "mp4": return .mp4
         case "m4v": return .m4v
+        case "m4a": return .m4a
+        case "wav": return .wav
+        case "aiff", "aif": return .aiff
+        case "caf": return .caf
         default: return .mov
         }
     }
@@ -544,7 +652,9 @@ final class PlayerView: NSView {
             switch chars {
             case ".": stepFrame(by: 1); return
             case ",": stepFrame(by: -1); return
-            case "/": takeSnapshot(); return
+            case "/":
+                if isAudioOnly { NSSound.beep() } else { takeSnapshot() }
+                return
             case " ": togglePlayPause(); return
             case "i": markTrim(isStart: true); return
             case "o": markTrim(isStart: false); return

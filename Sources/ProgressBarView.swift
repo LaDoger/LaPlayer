@@ -61,9 +61,19 @@ final class ProgressBarView: NSView {
     override func mouseDown(with event: NSEvent) { seek(with: event) }
     override func mouseDragged(with event: NSEvent) { seek(with: event) }
 
+    /// Clicks/drags within this many points of a trim marker snap to it exactly.
+    private static let snapDistance: CGFloat = 8
+
     private func seek(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        let fraction = min(max(point.x / bounds.width, 0), 1)
+        var fraction = min(max(point.x / bounds.width, 0), 1)
+
+        let candidates = [trimStartFraction, trimEndFraction].compactMap { $0 }
+        if let nearest = candidates.min(by: { abs($0 - fraction) < abs($1 - fraction) }),
+           abs(nearest * bounds.width - point.x) <= Self.snapDistance {
+            fraction = nearest
+        }
+
         progress = fraction
         onSeek?(fraction)
     }
