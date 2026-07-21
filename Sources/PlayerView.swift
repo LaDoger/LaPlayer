@@ -43,8 +43,7 @@ final class PlayerView: NSView {
             ("space", "play/pause"),
             ("←", "-3s"),
             ("→", "+3s"),
-            ("↑", "volume+"),
-            ("↓", "volume-"),
+            ("↑↓", "volume"),
             ("<", isAudioOnly ? "-1/24s" : "prev frame"),
             (">", isAudioOnly ? "+1/24s" : "next frame"),
         ]
@@ -438,7 +437,7 @@ final class PlayerView: NSView {
     }
 
     func adjustVolume(by delta: Int) {
-        volumePercent = min(100, max(0, volumePercent + delta))
+        volumePercent = min(200, max(0, volumePercent + delta))
         player.volume = Float(volumePercent) / 100
         showCenterMessage("Volume \(volumePercent)%")
     }
