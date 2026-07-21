@@ -236,7 +236,7 @@ final class PlayerView: NSView {
         centerMessageLabel.drawsBackground = false
         centerMessageLabel.alignment = .center
         centerMessageLabel.textColor = .white
-        centerMessageLabel.font = .systemFont(ofSize: 26, weight: .semibold)
+        centerMessageLabel.font = .monospacedSystemFont(ofSize: 26, weight: .semibold)
         centerMessageLabel.wantsLayer = true
         centerMessageLabel.alphaValue = 0
         centerMessageLabel.shadow = {
