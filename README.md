@@ -11,6 +11,8 @@ Native Swift + AppKit + AVFoundation. No dependencies, no Xcode project — one 
 | `space` | Play / pause (replays when at the end) |
 | `←` | Back 3 seconds |
 | `→` | Forward 3 seconds |
+| `↑` | Volume +5 (starts at 100) |
+| `↓` | Volume -5 |
 | `,` (`<`) | Previous frame (video) / back 1/24s (audio) |
 | `.` (`>`) | Next frame (video) / forward 1/24s (audio) |
 | `/` (`?`) | Snapshot — saves `{video_name}{i}.jpg` next to the video file (video only) |

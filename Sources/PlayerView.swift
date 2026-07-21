@@ -8,6 +8,7 @@ final class PlayerView: NSView {
     private var durationSeconds: Double = 0
     private var frameRate: Double = 0
     private var isAudioOnly = false
+    private var volumePercent = 100
 
     /// Audio has no real frame rate, so `<`/`>` step by a fixed unit instead of a decoded frame.
     private static let audioStepSeconds: Double = 1.0 / 24.0
@@ -42,6 +43,8 @@ final class PlayerView: NSView {
             ("space", "play/pause"),
             ("←", "-3s"),
             ("→", "+3s"),
+            ("↑", "volume+"),
+            ("↓", "volume-"),
             ("<", isAudioOnly ? "-1/24s" : "prev frame"),
             (">", isAudioOnly ? "+1/24s" : "next frame"),
         ]
@@ -434,6 +437,12 @@ final class PlayerView: NSView {
         }
     }
 
+    func adjustVolume(by delta: Int) {
+        volumePercent = min(100, max(0, volumePercent + delta))
+        player.volume = Float(volumePercent) / 100
+        showCenterMessage("Volume \(volumePercent)%")
+    }
+
     private func updateProgressUI() {
         let current = player.currentTime().seconds
         currentTimeLabel.stringValue = formatTime(current)
@@ -645,6 +654,8 @@ final class PlayerView: NSView {
         switch event.keyCode {
         case 123: jump(bySeconds: -3); return // left arrow
         case 124: jump(bySeconds: 3); return  // right arrow
+        case 125: adjustVolume(by: -5); return // down arrow
+        case 126: adjustVolume(by: 5); return  // up arrow
         default: break
         }
 
